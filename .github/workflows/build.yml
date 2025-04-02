@@ -1,9 +1,6 @@
 name: Build + Publish
 
-on:
-  pull_request:
-    types:
-      - closed
+on: workflow_dispatch
 
 env:
   BASE_DEV_VERSION: 1.0.0
