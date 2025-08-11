@@ -17,8 +17,8 @@ import {
   IconTable,
   IconTypography,
   IconMenu4,
-  IconCalendar,
-} from "@tabler/icons-react";
+  IconCalendar, IconAppWindow,
+} from '@tabler/icons-react';
 import {
   CommandProps,
   SlashMenuGroupedItemsType,
@@ -247,7 +247,7 @@ const CommandGroups: SlashMenuGroupedItemsType = {
       searchTerms: ["collapsible", "block", "toggle", "details", "expand"],
       icon: IconCaretRightFilled,
       command: ({ editor, range }: CommandProps) =>
-        editor.chain().focus().deleteRange(range).toggleDetails().run(),
+        editor.chain().focus().deleteRange(range).setDetails().run(),
     },
     {
       title: "Callout",
@@ -354,6 +354,20 @@ const CommandGroups: SlashMenuGroupedItemsType = {
           .focus()
           .deleteRange(range)
           .insertContent(currentDate)
+          .run();
+      },
+    },
+    {
+      title: "Iframe embed",
+      description: "Embed any Iframe",
+      searchTerms: ["iframe"],
+      icon: IconAppWindow,
+      command: ({ editor, range }: CommandProps) => {
+        editor
+          .chain()
+          .focus()
+          .deleteRange(range)
+          .setEmbed({ provider: "iframe" })
           .run();
       },
     },

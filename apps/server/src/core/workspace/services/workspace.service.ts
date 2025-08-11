@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { CreateWorkspaceDto } from '../dto/create-workspace.dto';
@@ -26,9 +27,17 @@ import { DomainService } from '../../../integrations/environment/domain.service'
 import { jsonArrayFrom } from 'kysely/helpers/postgres';
 import { addDays } from 'date-fns';
 import { DISALLOWED_HOSTNAMES, WorkspaceStatus } from '../workspace.constants';
+import { v4 } from 'uuid';
+import { AttachmentType } from 'src/core/attachment/attachment.constants';
+import { InjectQueue } from '@nestjs/bullmq';
+import { QueueJob, QueueName } from '../../../integrations/queue/constants';
+import { Queue } from 'bullmq';
+import { generateRandomSuffixNumbers } from '../../../common/helpers';
 
 @Injectable()
 export class WorkspaceService {
+  private readonly logger = new Logger(WorkspaceService.name);
+
   constructor(
     private workspaceRepo: WorkspaceRepo,
     private spaceService: SpaceService,
@@ -39,6 +48,8 @@ export class WorkspaceService {
     private environmentService: EnvironmentService,
     private domainService: DomainService,
     @InjectKysely() private readonly db: KyselyDB,
+    @InjectQueue(QueueName.ATTACHMENT_QUEUE) private attachmentQueue: Queue,
+    @InjectQueue(QueueName.BILLING_QUEUE) private billingQueue: Queue,
   ) {}
 
   async findById(workspaceId: string) {
@@ -91,13 +102,15 @@ export class WorkspaceService {
     createWorkspaceDto: CreateWorkspaceDto,
     trx?: KyselyTransaction,
   ) {
-    return await executeTx(
+    let trialEndAt = undefined;
+
+    const createdWorkspace = await executeTx(
       this.db,
       async (trx) => {
         let hostname = undefined;
-        let trialEndAt = undefined;
         let status = undefined;
         let plan = undefined;
+        let billingEmail = undefined;
 
         if (this.environmentService.isCloud()) {
           // generate unique hostname
@@ -110,6 +123,7 @@ export class WorkspaceService {
           );
           status = WorkspaceStatus.Active;
           plan = 'standard';
+          billingEmail = user.email;
         }
 
         // create workspace
@@ -121,6 +135,7 @@ export class WorkspaceService {
             status,
             trialEndAt,
             plan,
+            billingEmail,
           },
           trx,
         );
@@ -195,6 +210,28 @@ export class WorkspaceService {
       },
       trx,
     );
+
+    if (this.environmentService.isCloud() && trialEndAt) {
+      try {
+        const delay = trialEndAt.getTime() - Date.now();
+
+        await this.billingQueue.add(
+          QueueJob.TRIAL_ENDED,
+          { workspaceId: createdWorkspace.id },
+          { delay },
+        );
+
+        await this.billingQueue.add(
+          QueueJob.WELCOME_EMAIL,
+          { userId: user.id },
+          { delay: 60 * 1000 }, // 1m
+        );
+      } catch (err) {
+        this.logger.error(err);
+      }
+    }
+
+    return createdWorkspace;
   }
 
   async addUserToWorkspace(
@@ -341,24 +378,20 @@ export class WorkspaceService {
     name: string,
     trx?: KyselyTransaction,
   ): Promise<string> {
-    const generateRandomSuffix = (length: number) =>
-      Math.random()
-        .toFixed(length)
-        .substring(2, 2 + length);
-
     let subdomain = name
       .toLowerCase()
-      .replace(/[^a-z0-9]/g, '')
-      .substring(0, 20);
+      .replace(/[^a-z0-9-]/g, '')
+      .substring(0, 20)
+      .replace(/^-+|-+$/g, ''); //remove any hyphen at the start or end
     // Ensure we leave room for a random suffix.
-    const maxSuffixLength = 3;
+    const maxSuffixLength = 6;
 
     if (subdomain.length < 4) {
-      subdomain = `${subdomain}-${generateRandomSuffix(maxSuffixLength)}`;
+      subdomain = `${subdomain}-${generateRandomSuffixNumbers(maxSuffixLength)}`;
     }
 
     if (DISALLOWED_HOSTNAMES.includes(subdomain)) {
-      subdomain = `myworkspace-${generateRandomSuffix(maxSuffixLength)}`;
+      subdomain = `workspace-${generateRandomSuffixNumbers(maxSuffixLength)}`;
     }
 
     let uniqueHostname = subdomain;
@@ -372,7 +405,7 @@ export class WorkspaceService {
         break;
       }
       // Append a random suffix and retry.
-      const randomSuffix = generateRandomSuffix(maxSuffixLength);
+      const randomSuffix = generateRandomSuffixNumbers(maxSuffixLength);
       uniqueHostname = `${subdomain}-${randomSuffix}`.substring(0, 25);
     }
 
@@ -385,5 +418,67 @@ export class WorkspaceService {
       throw new NotFoundException('Hostname not found');
     }
     return { hostname: this.domainService.getUrl(hostname) };
+  }
+
+  async deleteUser(
+    authUser: User,
+    userId: string,
+    workspaceId: string,
+  ): Promise<void> {
+    const user = await this.userRepo.findById(userId, workspaceId);
+
+    if (!user || user.deletedAt) {
+      throw new BadRequestException('Workspace member not found');
+    }
+
+    const workspaceOwnerCount = await this.userRepo.roleCountByWorkspaceId(
+      UserRole.OWNER,
+      workspaceId,
+    );
+
+    if (user.role === UserRole.OWNER && workspaceOwnerCount === 1) {
+      throw new BadRequestException(
+        'There must be at least one workspace owner',
+      );
+    }
+
+    if (authUser.id === userId) {
+      throw new BadRequestException('You cannot delete yourself');
+    }
+
+    if (authUser.role === UserRole.ADMIN && user.role === UserRole.OWNER) {
+      throw new BadRequestException('You cannot delete a user with owner role');
+    }
+
+    await executeTx(this.db, async (trx) => {
+      await this.userRepo.updateUser(
+        {
+          name: 'Deleted user',
+          email: v4() + '@deleted.docmost.com',
+          avatarUrl: null,
+          settings: null,
+          deletedAt: new Date(),
+        },
+        userId,
+        workspaceId,
+        trx,
+      );
+
+      await trx.deleteFrom('groupUsers').where('userId', '=', userId).execute();
+      await trx
+        .deleteFrom('spaceMembers')
+        .where('userId', '=', userId)
+        .execute();
+      await trx
+        .deleteFrom('authAccounts')
+        .where('userId', '=', userId)
+        .execute();
+    });
+
+    try {
+      await this.attachmentQueue.add(QueueJob.DELETE_USER_AVATARS, user);
+    } catch (err) {
+      // empty
+    }
   }
 }

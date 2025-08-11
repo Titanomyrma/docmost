@@ -281,11 +281,89 @@ export class AttachmentService {
         }),
       );
 
-      if(failedDeletions.length === attachments.length){
-        throw new Error(`Failed to delete any attachments for spaceId: ${spaceId}`);
+      if (failedDeletions.length === attachments.length) {
+        throw new Error(
+          `Failed to delete any attachments for spaceId: ${spaceId}`,
+        );
+      }
+    } catch (err) {
+      throw err;
+    }
+  }
+
+  async handleDeleteUserAvatars(userId: string) {
+    try {
+      const userAvatars = await this.db
+        .selectFrom('attachments')
+        .select(['id', 'filePath'])
+        .where('creatorId', '=', userId)
+        .where('type', '=', AttachmentType.Avatar)
+        .execute();
+
+      if (!userAvatars || userAvatars.length === 0) {
+        return;
       }
 
+      await Promise.all(
+        userAvatars.map(async (attachment) => {
+          try {
+            await this.storageService.delete(attachment.filePath);
+            await this.attachmentRepo.deleteAttachmentById(attachment.id);
+          } catch (err) {
+            this.logger.log(
+              `DeleteUserAvatar: failed to delete user avatar ${attachment.id}:`,
+              err,
+            );
+          }
+        }),
+      );
     } catch (err) {
+      throw err;
+    }
+  }
+
+  async handleDeletePageAttachments(pageId: string) {
+    try {
+      // Fetch attachments for this page from database
+      const attachments = await this.db
+        .selectFrom('attachments')
+        .select(['id', 'filePath'])
+        .where('pageId', '=', pageId)
+        .execute();
+
+      if (!attachments || attachments.length === 0) {
+        return;
+      }
+
+      const failedDeletions = [];
+
+      await Promise.all(
+        attachments.map(async (attachment) => {
+          try {
+            // Delete from storage
+            await this.storageService.delete(attachment.filePath);
+            // Delete from database
+            await this.attachmentRepo.deleteAttachmentById(attachment.id);
+          } catch (err) {
+            failedDeletions.push(attachment.id);
+            this.logger.error(
+              `Failed to delete attachment ${attachment.id} for page ${pageId}:`,
+              err,
+            );
+          }
+        }),
+      );
+
+      if (failedDeletions.length > 0) {
+        this.logger.warn(
+          `Failed to delete ${failedDeletions.length} attachments for page ${pageId}`,
+        );
+      }
+    } catch (err) {
+      this.logger.error(
+        `Error in handleDeletePageAttachments for page ${pageId}:`,
+        err,
+      );
       throw err;
     }
   }

@@ -1,12 +1,15 @@
 import { ActionIcon, Group, Menu, Text, Tooltip } from "@mantine/core";
 import {
+  IconArrowRight,
   IconArrowsHorizontal,
   IconDots,
   IconFileExport,
   IconHistory,
   IconLink,
+  IconList,
   IconMessage,
   IconPrinter,
+  IconSearch,
   IconTrash,
   IconWifiOff,
 } from "@tabler/icons-react";
@@ -14,7 +17,12 @@ import React from "react";
 import useToggleAside from "@/hooks/use-toggle-aside.tsx";
 import { useAtom } from "jotai";
 import { historyAtoms } from "@/features/page-history/atoms/history-atoms.ts";
-import { useClipboard, useDisclosure } from "@mantine/hooks";
+import {
+  getHotkeyHandler,
+  useClipboard,
+  useDisclosure,
+  useHotkeys,
+} from "@mantine/hooks";
 import { useParams } from "react-router-dom";
 import { usePageQuery } from "@/features/page/queries/page-query.ts";
 import { buildPageUrl } from "@/features/page/page.utils.ts";
@@ -30,20 +38,46 @@ import {
   pageEditorAtom,
   yjsConnectionStatusAtom,
 } from "@/features/editor/atoms/editor-atoms.ts";
+import { searchAndReplaceStateAtom } from "@/features/editor/components/search-and-replace/atoms/search-and-replace-state-atom.ts";
 import { formattedDate, timeAgo } from "@/lib/time.ts";
+import { PageStateSegmentedControl } from "@/features/user/components/page-state-pref.tsx";
+import MovePageModal from "@/features/page/components/move-page-modal.tsx";
+import { useTimeAgo } from "@/hooks/use-time-ago.tsx";
+import ShareModal from "@/features/share/components/share-modal.tsx";
 
 interface PageHeaderMenuProps {
   readOnly?: boolean;
 }
 export default function PageHeaderMenu({ readOnly }: PageHeaderMenuProps) {
+  const { t } = useTranslation();
   const toggleAside = useToggleAside();
   const [yjsConnectionStatus] = useAtom(yjsConnectionStatusAtom);
+
+  useHotkeys(
+    [
+      [
+        "mod+F",
+        () => {
+          const event = new CustomEvent("openFindDialogFromEditor", {});
+          document.dispatchEvent(event);
+        },
+      ],
+      [
+        "Escape",
+        () => {
+          const event = new CustomEvent("closeFindDialogFromEditor", {});
+          document.dispatchEvent(event);
+        },
+      ],
+    ],
+    [],
+  );
 
   return (
     <>
       {yjsConnectionStatus === "disconnected" && (
         <Tooltip
-          label="Real-time editor connection lost. Retrying..."
+          label={t("Real-time editor connection lost. Retrying...")}
           openDelay={250}
           withArrow
         >
@@ -53,13 +87,27 @@ export default function PageHeaderMenu({ readOnly }: PageHeaderMenuProps) {
         </Tooltip>
       )}
 
-      <Tooltip label="Comments" openDelay={250} withArrow>
+      {!readOnly && <PageStateSegmentedControl size="xs" />}
+
+      <ShareModal readOnly={readOnly} />
+
+      <Tooltip label={t("Comments")} openDelay={250} withArrow>
         <ActionIcon
           variant="default"
           style={{ border: "none" }}
           onClick={() => toggleAside("comments")}
         >
           <IconMessage size={20} stroke={2} />
+        </ActionIcon>
+      </Tooltip>
+
+      <Tooltip label={t("Table of contents")} openDelay={250} withArrow>
+        <ActionIcon
+          variant="default"
+          style={{ border: "none" }}
+          onClick={() => toggleAside("toc")}
+        >
+          <IconList size={20} stroke={2} />
         </ActionIcon>
       </Tooltip>
 
@@ -83,7 +131,12 @@ function PageActionMenu({ readOnly }: PageActionMenuProps) {
   const [tree] = useAtom(treeApiAtom);
   const [exportOpened, { open: openExportModal, close: closeExportModal }] =
     useDisclosure(false);
+  const [
+    movePageModalOpened,
+    { open: openMovePageModal, close: closeMoveSpaceModal },
+  ] = useDisclosure(false);
   const [pageEditor] = useAtom(pageEditorAtom);
+  const pageUpdatedAt = useTimeAgo(page?.updatedAt);
 
   const handleCopyLink = () => {
     const pageUrl =
@@ -147,6 +200,15 @@ function PageActionMenu({ readOnly }: PageActionMenuProps) {
 
           <Menu.Divider />
 
+          {!readOnly && (
+            <Menu.Item
+              leftSection={<IconArrowRight size={16} />}
+              onClick={openMovePageModal}
+            >
+              {t("Move")}
+            </Menu.Item>
+          )}
+
           <Menu.Item
             leftSection={<IconFileExport size={16} />}
             onClick={openExportModal}
@@ -169,7 +231,7 @@ function PageActionMenu({ readOnly }: PageActionMenuProps) {
                 leftSection={<IconTrash size={16} />}
                 onClick={handleDeletePage}
               >
-                {t("Delete")}
+                {t("Move to trash")}
               </Menu.Item>
             </>
           )}
@@ -181,7 +243,7 @@ function PageActionMenu({ readOnly }: PageActionMenuProps) {
               <Tooltip
                 label={t("Edited by {{name}} {{time}}", {
                   name: page.lastUpdatedBy.name,
-                  time: timeAgo(page.updatedAt),
+                  time: pageUpdatedAt,
                 })}
                 position="left-start"
               >
@@ -216,6 +278,14 @@ function PageActionMenu({ readOnly }: PageActionMenuProps) {
         id={page.id}
         open={exportOpened}
         onClose={closeExportModal}
+      />
+
+      <MovePageModal
+        pageId={page.id}
+        slugId={page.slugId}
+        currentSpaceSlug={spaceSlug}
+        onClose={closeMoveSpaceModal}
+        open={movePageModalOpened}
       />
     </>
   );

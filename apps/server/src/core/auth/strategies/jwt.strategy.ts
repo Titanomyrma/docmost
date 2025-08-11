@@ -1,9 +1,4 @@
-import {
-  BadRequestException,
-  Injectable,
-  Logger,
-  UnauthorizedException,
-} from '@nestjs/common';
+import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { PassportStrategy } from '@nestjs/passport';
 import { Strategy } from 'passport-jwt';
 import { EnvironmentService } from '../../../integrations/environment/environment.service';
@@ -11,6 +6,7 @@ import { JwtPayload, JwtType } from '../dto/jwt-payload';
 import { WorkspaceRepo } from '@docmost/db/repos/workspace/workspace.repo';
 import { UserRepo } from '@docmost/db/repos/user/user.repo';
 import { FastifyRequest } from 'fastify';
+import { extractBearerTokenFromHeader } from '../../../common/helpers';
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
@@ -23,7 +19,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
   ) {
     super({
       jwtFromRequest: (req: FastifyRequest) => {
-        return req.cookies?.authToken || this.extractTokenFromHeader(req);
+        return req.cookies?.authToken || extractBearerTokenFromHeader(req);
       },
       ignoreExpiration: false,
       secretOrKey: environmentService.getAppSecret(),
@@ -47,15 +43,10 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
     }
     const user = await this.userRepo.findById(payload.sub, payload.workspaceId);
 
-    if (!user) {
+    if (!user || user.deactivatedAt || user.deletedAt) {
       throw new UnauthorizedException();
     }
 
     return { user, workspace };
-  }
-
-  private extractTokenFromHeader(request: FastifyRequest): string | undefined {
-    const [type, token] = request.headers.authorization?.split(' ') ?? [];
-    return type === 'Bearer' ? token : undefined;
   }
 }
